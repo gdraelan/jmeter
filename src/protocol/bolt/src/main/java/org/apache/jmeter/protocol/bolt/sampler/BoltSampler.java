@@ -22,6 +22,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -35,12 +36,14 @@ import org.apache.jmeter.samplers.SampleResult;
 import org.apache.jmeter.samplers.Sampler;
 import org.apache.jmeter.testbeans.TestBean;
 import org.apache.jmeter.testelement.TestElement;
-import org.neo4j.driver.v1.Driver;
-import org.neo4j.driver.v1.Record;
-import org.neo4j.driver.v1.Session;
-import org.neo4j.driver.v1.StatementResult;
-import org.neo4j.driver.v1.exceptions.Neo4jException;
-import org.neo4j.driver.v1.summary.ResultSummary;
+import org.neo4j.driver.Driver;
+import org.neo4j.driver.Record;
+import org.neo4j.driver.Result;
+import org.neo4j.driver.Session;
+import org.neo4j.driver.SessionConfig;
+import org.neo4j.driver.TransactionConfig;
+import org.neo4j.driver.exceptions.Neo4jException;
+import org.neo4j.driver.summary.ResultSummary;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -82,7 +85,14 @@ public class BoltSampler extends AbstractBoltTestElement implements Sampler, Tes
 
         try {
             res.setResponseHeaders("Cypher request: " + getCypher());
-            res.setResponseData(execute(BoltConnectionElement.getDriver(), getCypher(), params), StandardCharsets.UTF_8.name());
+            res.setResponseData(
+                    execute(
+                        BoltConnectionElement.getDriver(),
+                        getCypher(),
+                        params,
+                        getSessionConfig(),
+                        getTransactionConfig()),
+                    StandardCharsets.UTF_8.name());
         } catch (Exception ex) {
             res = handleException(res, ex);
         } finally {
@@ -100,9 +110,10 @@ public class BoltSampler extends AbstractBoltTestElement implements Sampler, Tes
         return APPLICABLE_CONFIG_CLASSES.contains(guiClass);
     }
 
-    private String execute(Driver driver, String cypher, Map<String, Object> params) {
-        try (Session session = driver.session()) {
-            StatementResult statementResult = session.run(cypher, params);
+    private String execute(Driver driver, String cypher, Map<String, Object> params,
+                           SessionConfig sessionConfig, TransactionConfig txConfig) {
+        try (Session session = driver.session(sessionConfig)) {
+            Result statementResult = session.run(cypher, params, txConfig);
             return response(statementResult);
         }
     }
@@ -114,7 +125,9 @@ public class BoltSampler extends AbstractBoltTestElement implements Sampler, Tes
         } else {
             res.setResponseCode("500");
         }
-        res.setResponseData(ObjectUtils.defaultIfNull(ex.getMessage(), "NO MESSAGE").getBytes());
+        res.setResponseData(
+                ObjectUtils.defaultIfNull(ex.getMessage(), "NO MESSAGE"),
+                res.getDataEncodingNoDefault());
         res.setSuccessful(false);
         return res;
     }
@@ -133,14 +146,27 @@ public class BoltSampler extends AbstractBoltTestElement implements Sampler, Tes
                 .append(getCypher())
                 .append("\n")
                 .append("Parameters: \n")
-                .append(getParams());
+                .append(getParams())
+                .append("\n")
+                .append("Database: \n")
+                .append(getDatabase())
+                .append("\n")
+                .append("Access Mode: \n")
+                .append(getAccessMode());
         return request.toString();
     }
 
-    private String response(StatementResult result) {
+    private String response(Result result) {
         StringBuilder response = new StringBuilder();
+        List<Record> records;
+        if (isRecordQueryResults()) {
+            //get records already as consume() will exhaust the stream
+            records = result.list();
+        } else {
+            records = Collections.emptyList();
+        }
         response.append("\nSummary:");
-        ResultSummary summary = result.summary();
+        ResultSummary summary = result.consume();
         response.append("\nConstraints Added: ")
                 .append(summary.counters().constraintsAdded())
                 .append("\nConstraints Removed: ")
@@ -165,7 +191,7 @@ public class BoltSampler extends AbstractBoltTestElement implements Sampler, Tes
                 .append(summary.counters().relationshipsDeleted());
         response.append("\n\nRecords: ");
         if (isRecordQueryResults()) {
-            for (Record record : result.list()) {
+            for (Record record : records) {
                 response.append("\n").append(record);
             }
         } else {
